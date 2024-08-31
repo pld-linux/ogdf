@@ -1,0 +1,394 @@
+--- ogdf-elderberry-202309/src/ogdf/energybased/SpringEmbedderFRExact.cpp.orig	2023-09-14 15:14:23.000000000 +0200
++++ ogdf-elderberry-202309/src/ogdf/energybased/SpringEmbedderFRExact.cpp	2024-08-29 21:41:39.955107959 +0200
+@@ -37,8 +37,6 @@
+ #	include <omp.h>
+ #endif
+ 
+-#include <ogdf/basic/internal/intrinsics.h>
+-
+ namespace ogdf {
+ 
+ SpringEmbedderFRExact::ArrayGraph::ArrayGraph(GraphAttributes& ga)
+@@ -385,180 +383,4 @@ void SpringEmbedderFRExact::mainStep(Arr
+ 	System::alignedMemoryFree(disp_y);
+ }
+ 
+-void SpringEmbedderFRExact::mainStep_sse3(ArrayGraph& C) {
+-#ifdef OGDF_SSE3_EXTENSIONS
+-	const int n = C.numberOfNodes();
+-
+-#	ifdef _OPENMP
+-	const int work = 256;
+-	const int nThreadsRep = min(omp_get_max_threads(), 1 + n * n / work);
+-	const int nThreadsPrev = min(omp_get_max_threads(), 1 + n / work);
+-#	endif
+-
+-	const double k = m_idealEdgeLength;
+-	const double kSquare = k * k;
+-	const double c_rep = 0.052 * kSquare; // 0.2 = factor for repulsive forces as suggested by Warshal
+-
+-	const double minDist = 10e-6; //100*DBL_EPSILON;
+-	const double minDistSquare = minDist * minDist;
+-
+-	double* disp_x = (double*)System::alignedMemoryAlloc16(n * sizeof(double));
+-	double* disp_y = (double*)System::alignedMemoryAlloc16(n * sizeof(double));
+-
+-#	ifdef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
+-	__m128d mm_kSquare = _mm_set1_pd(kSquare);
+-#	endif
+-	__m128d mm_minDist = _mm_set1_pd(minDist);
+-	__m128d mm_minDistSquare = _mm_set1_pd(minDistSquare);
+-	__m128d mm_c_rep = _mm_set1_pd(c_rep);
+-
+-#	pragma omp parallel num_threads(nThreadsRep)
+-	{
+-		double tx = m_txNull;
+-		double ty = m_tyNull;
+-		int cF = 1;
+-
+-		for (int i = 1; i <= m_iterations; i++) {
+-			// repulsive forces
+-
+-#	pragma omp for
+-			for (int v = 0; v < n; ++v) {
+-				__m128d mm_disp_xv = _mm_setzero_pd();
+-				__m128d mm_disp_yv = _mm_setzero_pd();
+-
+-				__m128d mm_xv = _mm_set1_pd(C.m_x[v]);
+-				__m128d mm_yv = _mm_set1_pd(C.m_y[v]);
+-
+-				auto compute_pd = [&](int u) {
+-					__m128d mm_delta_x = _mm_sub_pd(mm_xv, _mm_load_pd(&C.m_x[u]));
+-					__m128d mm_delta_y = _mm_sub_pd(mm_yv, _mm_load_pd(&C.m_y[u]));
+-
+-					__m128d mm_xSquare = _mm_mul_pd(mm_delta_x, mm_delta_x);
+-					__m128d mm_ySquare = _mm_mul_pd(mm_delta_y, mm_delta_y);
+-					__m128d mm_distSquare =
+-							_mm_max_pd(mm_minDistSquare, _mm_add_pd(mm_xSquare, mm_ySquare));
+-
+-					__m128d mm_t =
+-#	ifndef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
+-							_mm_div_pd(_mm_load_pd(&C.m_nodeWeight[u]), mm_distSquare);
+-#	else
+-							_mm_div_pd(mm_kSquare, mm_distSquare);
+-#	endif
+-					mm_disp_xv = _mm_add_pd(mm_disp_xv, _mm_mul_pd(mm_delta_x, mm_t));
+-					mm_disp_yv = _mm_add_pd(mm_disp_yv, _mm_mul_pd(mm_delta_y, mm_t));
+-				};
+-				auto compute_sd = [&](int u) {
+-					__m128d mm_delta_x = _mm_sub_sd(mm_xv, _mm_load_sd(&C.m_x[u]));
+-					__m128d mm_delta_y = _mm_sub_sd(mm_yv, _mm_load_sd(&C.m_y[u]));
+-
+-					__m128d mm_xSquare = _mm_mul_sd(mm_delta_x, mm_delta_x);
+-					__m128d mm_ySquare = _mm_mul_sd(mm_delta_y, mm_delta_y);
+-					__m128d mm_distSquare =
+-							_mm_max_sd(mm_minDistSquare, _mm_add_sd(mm_xSquare, mm_ySquare));
+-
+-					__m128d mm_t =
+-#	ifndef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
+-							_mm_div_sd(_mm_load_sd(&C.m_nodeWeight[u]), mm_distSquare);
+-#	else
+-							_mm_div_sd(mm_kSquare, mm_distSquare);
+-#	endif
+-					mm_disp_xv = _mm_add_sd(mm_disp_xv, _mm_mul_sd(mm_delta_x, mm_t));
+-					mm_disp_yv = _mm_add_sd(mm_disp_yv, _mm_mul_sd(mm_delta_y, mm_t));
+-				};
+-
+-				int u;
+-				for (u = 0; u + 1 < v; u += 2) {
+-					compute_pd(u);
+-				}
+-				int uStart = u + 2;
+-				if (u == v) {
+-					++u;
+-				}
+-				if (u < n) {
+-					compute_sd(u);
+-				}
+-
+-				// TODO do we need u+1 here?
+-				//      GCC's leak sanitizer reports a heap buffer overflow when using just u.
+-				for (u = uStart; u + 1 < n; u += 2) {
+-					compute_pd(u);
+-				}
+-				if (u < n) {
+-					compute_sd(u);
+-				}
+-
+-				mm_disp_xv = _mm_hadd_pd(mm_disp_xv, mm_disp_xv);
+-				mm_disp_yv = _mm_hadd_pd(mm_disp_yv, mm_disp_yv);
+-
+-				_mm_store_sd(&disp_x[v], _mm_mul_sd(mm_disp_xv, mm_c_rep));
+-				_mm_store_sd(&disp_y[v], _mm_mul_sd(mm_disp_yv, mm_c_rep));
+-			}
+-
+-			// attractive forces
+-
+-#	pragma omp single
+-			for (int e = 0; e < C.numberOfEdges(); ++e) {
+-				int v = C.m_src[e];
+-				int u = C.m_tgt[e];
+-
+-				double delta_x = C.m_x[v] - C.m_x[u];
+-				double delta_y = C.m_y[v] - C.m_y[u];
+-
+-				double dist = max(minDist, sqrt(delta_x * delta_x + delta_y * delta_y));
+-
+-				disp_x[v] -= delta_x * dist / k;
+-				disp_y[v] -= delta_y * dist / k;
+-
+-				disp_x[u] += delta_x * dist / k;
+-				disp_y[u] += delta_y * dist / k;
+-			}
+-
+-			// limit the maximum displacement to the temperature (m_tx,m_ty)
+-
+-			__m128d mm_tx = _mm_set1_pd(tx);
+-			__m128d mm_ty = _mm_set1_pd(ty);
+-
+-#	pragma omp for nowait
+-			for (int v = 0; v < n - 1; v += 2) {
+-				__m128d mm_disp_xv = _mm_load_pd(&disp_x[v]);
+-				__m128d mm_disp_yv = _mm_load_pd(&disp_y[v]);
+-
+-				__m128d mm_dist = _mm_max_pd(mm_minDist,
+-						_mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(mm_disp_xv, mm_disp_xv),
+-								_mm_mul_pd(mm_disp_yv, mm_disp_yv))));
+-
+-				_mm_store_pd(&C.m_x[v],
+-						_mm_add_pd(_mm_load_pd(&C.m_x[v]),
+-								_mm_mul_pd(_mm_div_pd(mm_disp_xv, mm_dist),
+-										_mm_min_pd(mm_dist, mm_tx))));
+-				_mm_store_pd(&C.m_y[v],
+-						_mm_add_pd(_mm_load_pd(&C.m_y[v]),
+-								_mm_mul_pd(_mm_div_pd(mm_disp_yv, mm_dist),
+-										_mm_min_pd(mm_dist, mm_ty))));
+-			}
+-#	pragma omp single nowait
+-			{
+-				if (n % 2) {
+-					int v = n - 1;
+-					double dist = max(minDist, sqrt(disp_x[v] * disp_x[v] + disp_y[v] * disp_y[v]));
+-
+-					C.m_x[v] += disp_x[v] / dist * min(dist, tx);
+-					C.m_y[v] += disp_y[v] / dist * min(dist, ty);
+-				}
+-			}
+-
+-			cool(tx, ty, cF);
+-
+-#	pragma omp barrier
+-		}
+-	}
+-
+-	System::alignedMemoryFree(disp_x);
+-	System::alignedMemoryFree(disp_y);
+-
+-#else
+-	mainStep(C);
+-#endif
+-}
+-
+ }
+--- ogdf-elderberry-202309/src/ogdf/energybased/SpringEmbedderFRExactSSE3.cpp.orig	1970-01-01 01:00:00.000000000 +0100
++++ ogdf-elderberry-202309/src/ogdf/energybased/SpringEmbedderFRExactSSE3.cpp	2024-08-29 21:41:42.018430114 +0200
+@@ -0,0 +1,189 @@
++#include <ogdf/basic/simple_graph_alg.h>
++#include <ogdf/energybased/SpringEmbedderFRExact.h>
++#include <ogdf/packing/TileToRowsCCPacker.h>
++
++#ifdef _OPENMP
++#	include <omp.h>
++#endif
++
++#include <ogdf/basic/internal/intrinsics.h>
++
++namespace ogdf {
++
++void SpringEmbedderFRExact::mainStep_sse3(ArrayGraph& C) {
++#ifdef OGDF_SSE3_EXTENSIONS
++	const int n = C.numberOfNodes();
++
++#	ifdef _OPENMP
++	const int work = 256;
++	const int nThreadsRep = min(omp_get_max_threads(), 1 + n * n / work);
++	const int nThreadsPrev = min(omp_get_max_threads(), 1 + n / work);
++#	endif
++
++	const double k = m_idealEdgeLength;
++	const double kSquare = k * k;
++	const double c_rep = 0.052 * kSquare; // 0.2 = factor for repulsive forces as suggested by Warshal
++
++	const double minDist = 10e-6; //100*DBL_EPSILON;
++	const double minDistSquare = minDist * minDist;
++
++	double* disp_x = (double*)System::alignedMemoryAlloc16(n * sizeof(double));
++	double* disp_y = (double*)System::alignedMemoryAlloc16(n * sizeof(double));
++
++#	ifdef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
++	__m128d mm_kSquare = _mm_set1_pd(kSquare);
++#	endif
++	__m128d mm_minDist = _mm_set1_pd(minDist);
++	__m128d mm_minDistSquare = _mm_set1_pd(minDistSquare);
++	__m128d mm_c_rep = _mm_set1_pd(c_rep);
++
++#	pragma omp parallel num_threads(nThreadsRep)
++	{
++		double tx = m_txNull;
++		double ty = m_tyNull;
++		int cF = 1;
++
++		for (int i = 1; i <= m_iterations; i++) {
++			// repulsive forces
++
++#	pragma omp for
++			for (int v = 0; v < n; ++v) {
++				__m128d mm_disp_xv = _mm_setzero_pd();
++				__m128d mm_disp_yv = _mm_setzero_pd();
++
++				__m128d mm_xv = _mm_set1_pd(C.m_x[v]);
++				__m128d mm_yv = _mm_set1_pd(C.m_y[v]);
++
++				auto compute_pd = [&](int u) {
++					__m128d mm_delta_x = _mm_sub_pd(mm_xv, _mm_load_pd(&C.m_x[u]));
++					__m128d mm_delta_y = _mm_sub_pd(mm_yv, _mm_load_pd(&C.m_y[u]));
++
++					__m128d mm_xSquare = _mm_mul_pd(mm_delta_x, mm_delta_x);
++					__m128d mm_ySquare = _mm_mul_pd(mm_delta_y, mm_delta_y);
++					__m128d mm_distSquare =
++							_mm_max_pd(mm_minDistSquare, _mm_add_pd(mm_xSquare, mm_ySquare));
++
++					__m128d mm_t =
++#	ifndef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
++							_mm_div_pd(_mm_load_pd(&C.m_nodeWeight[u]), mm_distSquare);
++#	else
++							_mm_div_pd(mm_kSquare, mm_distSquare);
++#	endif
++					mm_disp_xv = _mm_add_pd(mm_disp_xv, _mm_mul_pd(mm_delta_x, mm_t));
++					mm_disp_yv = _mm_add_pd(mm_disp_yv, _mm_mul_pd(mm_delta_y, mm_t));
++				};
++				auto compute_sd = [&](int u) {
++					__m128d mm_delta_x = _mm_sub_sd(mm_xv, _mm_load_sd(&C.m_x[u]));
++					__m128d mm_delta_y = _mm_sub_sd(mm_yv, _mm_load_sd(&C.m_y[u]));
++
++					__m128d mm_xSquare = _mm_mul_sd(mm_delta_x, mm_delta_x);
++					__m128d mm_ySquare = _mm_mul_sd(mm_delta_y, mm_delta_y);
++					__m128d mm_distSquare =
++							_mm_max_sd(mm_minDistSquare, _mm_add_sd(mm_xSquare, mm_ySquare));
++
++					__m128d mm_t =
++#	ifndef OGDF_SPRINGEMBEDDERFREXACT_USE_KSQUARE
++							_mm_div_sd(_mm_load_sd(&C.m_nodeWeight[u]), mm_distSquare);
++#	else
++							_mm_div_sd(mm_kSquare, mm_distSquare);
++#	endif
++					mm_disp_xv = _mm_add_sd(mm_disp_xv, _mm_mul_sd(mm_delta_x, mm_t));
++					mm_disp_yv = _mm_add_sd(mm_disp_yv, _mm_mul_sd(mm_delta_y, mm_t));
++				};
++
++				int u;
++				for (u = 0; u + 1 < v; u += 2) {
++					compute_pd(u);
++				}
++				int uStart = u + 2;
++				if (u == v) {
++					++u;
++				}
++				if (u < n) {
++					compute_sd(u);
++				}
++
++				// TODO do we need u+1 here?
++				//      GCC's leak sanitizer reports a heap buffer overflow when using just u.
++				for (u = uStart; u + 1 < n; u += 2) {
++					compute_pd(u);
++				}
++				if (u < n) {
++					compute_sd(u);
++				}
++
++				mm_disp_xv = _mm_hadd_pd(mm_disp_xv, mm_disp_xv);
++				mm_disp_yv = _mm_hadd_pd(mm_disp_yv, mm_disp_yv);
++
++				_mm_store_sd(&disp_x[v], _mm_mul_sd(mm_disp_xv, mm_c_rep));
++				_mm_store_sd(&disp_y[v], _mm_mul_sd(mm_disp_yv, mm_c_rep));
++			}
++
++			// attractive forces
++
++#	pragma omp single
++			for (int e = 0; e < C.numberOfEdges(); ++e) {
++				int v = C.m_src[e];
++				int u = C.m_tgt[e];
++
++				double delta_x = C.m_x[v] - C.m_x[u];
++				double delta_y = C.m_y[v] - C.m_y[u];
++
++				double dist = max(minDist, sqrt(delta_x * delta_x + delta_y * delta_y));
++
++				disp_x[v] -= delta_x * dist / k;
++				disp_y[v] -= delta_y * dist / k;
++
++				disp_x[u] += delta_x * dist / k;
++				disp_y[u] += delta_y * dist / k;
++			}
++
++			// limit the maximum displacement to the temperature (m_tx,m_ty)
++
++			__m128d mm_tx = _mm_set1_pd(tx);
++			__m128d mm_ty = _mm_set1_pd(ty);
++
++#	pragma omp for nowait
++			for (int v = 0; v < n - 1; v += 2) {
++				__m128d mm_disp_xv = _mm_load_pd(&disp_x[v]);
++				__m128d mm_disp_yv = _mm_load_pd(&disp_y[v]);
++
++				__m128d mm_dist = _mm_max_pd(mm_minDist,
++						_mm_sqrt_pd(_mm_add_pd(_mm_mul_pd(mm_disp_xv, mm_disp_xv),
++								_mm_mul_pd(mm_disp_yv, mm_disp_yv))));
++
++				_mm_store_pd(&C.m_x[v],
++						_mm_add_pd(_mm_load_pd(&C.m_x[v]),
++								_mm_mul_pd(_mm_div_pd(mm_disp_xv, mm_dist),
++										_mm_min_pd(mm_dist, mm_tx))));
++				_mm_store_pd(&C.m_y[v],
++						_mm_add_pd(_mm_load_pd(&C.m_y[v]),
++								_mm_mul_pd(_mm_div_pd(mm_disp_yv, mm_dist),
++										_mm_min_pd(mm_dist, mm_ty))));
++			}
++#	pragma omp single nowait
++			{
++				if (n % 2) {
++					int v = n - 1;
++					double dist = max(minDist, sqrt(disp_x[v] * disp_x[v] + disp_y[v] * disp_y[v]));
++
++					C.m_x[v] += disp_x[v] / dist * min(dist, tx);
++					C.m_y[v] += disp_y[v] / dist * min(dist, ty);
++				}
++			}
++
++			cool(tx, ty, cF);
++
++#	pragma omp barrier
++		}
++	}
++
++	System::alignedMemoryFree(disp_x);
++	System::alignedMemoryFree(disp_y);
++
++#else
++	mainStep(C);
++#endif
++}
++
++}
+--- ogdf-elderberry-202309/cmake/ogdf.cmake.orig	2023-09-14 15:14:23.000000000 +0200
++++ ogdf-elderberry-202309/cmake/ogdf.cmake	2024-08-29 21:49:24.562590964 +0200
+@@ -170,6 +170,7 @@ if(has_sse3_intrin)
+   set(OGDF_SSE3_EXTENSIONS <intrin.h>)
+ elseif(has_sse3_pmmintrin)
+   set(OGDF_SSE3_EXTENSIONS <pmmintrin.h>)
++  set_source_file_properties( "src/ogdf/energybased/SpringEmbedderFRExactSSE3.cpp" PROPERTIES COMPILE_FLAGS "-msse3" )
+ else()
+   message(STATUS "SSE3 could not be activated")
+ endif()

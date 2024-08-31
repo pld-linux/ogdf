@@ -1,0 +1,11 @@
+--- ogdf-elderberry-202309/cmake/compiler-specifics.cmake.orig	2023-09-14 15:14:23.000000000 +0200
++++ ogdf-elderberry-202309/cmake/compiler-specifics.cmake	2024-08-29 06:25:21.576284732 +0200
+@@ -15,7 +15,7 @@ endif()
+ # use native arch (ie, activate things like SSE)
+ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^arm")
+   # cannot use add_definitions() here because it does not work with check-sse3.cmake
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+ endif()
+ 
+ # set default warning flags for OGDF and tests
