@@ -64,8 +64,8 @@ Dokumentacja API biblioteki OGDF.
 
 %prep
 %setup -q -n %{name}-elderberry-202309
-%patch0 -p1
-%patch1 -p1
+%patch -P0 -p1
+%patch -P1 -p1
 
 %build
 install -d build
